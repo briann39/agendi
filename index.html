@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Reservá tu turno · Agendi</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="wrap" id="loading"><p class="muted">Cargando…</p></div>
+<div class="wrap" id="notfound" hidden><h1>No encontramos este negocio</h1><p class="muted">Revisá el link que te pasaron.</p></div>
+
+<div class="wrap" id="app" hidden>
+  <header>
+    <h1 id="bizName"></h1>
+    <p class="muted" id="bizTag"></p>
+    <div class="meta"><span id="bizAddr"></span></div>
+  </header>
+  <section><h2>1. Elegí el servicio</h2><div class="list" id="services"></div></section>
+  <section><h2>2. Elegí tu barbero</h2><div class="list" id="barbers"></div></section>
+  <section><h2>3. Elegí el día <span id="monthLabel"></span></h2><div class="days" id="days"></div></section>
+  <section><h2>4. Elegí la hora</h2><div class="slots" id="slots"></div></section>
+  <section class="field">
+    <h2>5. Tus datos</h2>
+    <div><label for="name">Nombre</label><input id="name" autocomplete="given-name" maxlength="80" placeholder="Ej: Martín"></div>
+    <div><label for="phone">Teléfono</label><input id="phone" type="tel" inputmode="tel" autocomplete="tel" maxlength="20" placeholder="Ej: 099 123 456"></div>
+    <div><label for="note">Comentario (opcional)</label><textarea id="note" maxlength="300" placeholder="Ej: corte bajo a los costados"></textarea></div>
+  </section>
+  <footer>Turnos online con <b>Agendi</b></footer>
+</div>
+
+<div class="wrap" id="done" hidden>
+  <h1>¡Turno reservado!</h1>
+  <div class="card" id="doneText"></div>
+  <a class="cta" id="doneWa" target="_blank" rel="noopener">Avisar por WhatsApp</a>
+  <button class="ghost" id="again" type="button">Reservar otro turno</button>
+</div>
+
+<div class="bar" id="bar" hidden><div class="bar-in">
+  <div class="sum" id="sum">Elegí servicio, barbero, día y hora.</div>
+  <p class="err" id="err" hidden></p>
+  <button class="cta" id="cta" type="button" disabled>Reservar turno</button>
+</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+const slug=new URLSearchParams(location.search).get("b")||AGENDI_CONFIG.DEFAULT_SLUG;
+const ANY={id:null,name:"Cualquiera disponible",note:"El primero que esté libre"};
+const st={svc:null,barber:null,day:null,time:null};
+let BIZ=null,BUSY=[],TODAY=null,NOWMIN=0;
+const DAYS_AHEAD=14;
+
+const ERR={horario_ocupado:"Ese horario se acaba de ocupar. Elegí otro.",horario_pasado:"Ese horario ya pasó. Elegí otro.",
+  telefono_invalido:"Revisá el teléfono.",falta_nombre:"Falta tu nombre.",servicio_no_existe:"Ese servicio ya no está disponible."};
+
+async function load(){
+  const {data,error}=await sb.rpc("public_business",{p_slug:slug});
+  $("loading").hidden=true;
+  if(error||!data){$("notfound").hidden=false;return}
+  BIZ=data;TODAY=parseDay(BIZ.today);NOWMIN=BIZ.now_min;
+  document.title=`Reservá en ${BIZ.name}`;
+  $("bizName").textContent=BIZ.name;$("bizTag").textContent=BIZ.tagline||"";
+  $("bizAddr").textContent=BIZ.address?"📍 "+BIZ.address:"";
+  $("monthLabel").textContent=MON[TODAY.getMonth()];
+  renderServices();renderBarbers();
+  await loadBusy();renderDays();renderSlots();
+  $("app").hidden=false;$("bar").hidden=false;
+}
+async function loadBusy(){
+  const to=new Date(TODAY);to.setDate(to.getDate()+DAYS_AHEAD);
+  const {data}=await sb.rpc("public_busy",{p_business:BIZ.id,p_from:dayStr(TODAY),p_to:dayStr(to)});
+  BUSY=data||[];
+}
+
+function renderServices(){
+  const box=$("services");box.innerHTML="";
+  BIZ.services.forEach(s=>{
+    const b=document.createElement("button");b.type="button";b.className="opt";b.setAttribute("aria-pressed","false");
+    b.innerHTML=`<span><span class="n"></span><small>${s.minutes} min</small></span><b></b>`;
+    b.querySelector(".n").textContent=s.name;b.querySelector("b").textContent=`${BIZ.currency} ${s.price}`;
+    b.onclick=()=>{st.svc=s;st.time=null;press(box,b);renderSlots();update()};
+    box.appendChild(b);
+  });
+}
+function renderBarbers(){
+  const box=$("barbers");box.innerHTML="";
+  const list=BIZ.barbers.length>1?[ANY,...BIZ.barbers]:BIZ.barbers;
+  list.forEach(br=>{
+    const b=document.createElement("button");b.type="button";b.className="opt";b.setAttribute("aria-pressed","false");
+    b.innerHTML=`<span><span class="n"></span><small></small></span>`;
+    b.querySelector(".n").textContent=br.name;b.querySelector("small").textContent=br.note||"";
+    b.onclick=()=>{st.barber=br;press(box,b);if(st.day&&!openAny(st.day))st.day=null;st.time=null;renderDays();renderSlots();update()};
+    box.appendChild(b);
+  });
+  if(list.length===1){st.barber=list[0];box.firstChild.setAttribute("aria-pressed","true")}
+}
+const candidates=()=>(!st.barber||!st.barber.id)?BIZ.barbers:[st.barber];
+const openAny=d=>candidates().some(b=>b.hours[d.getDay()]);
+
+// ¿Está libre este barbero en este día/hora para la duración elegida?
+function free(br,d,start,mins){
+  const h=br.hours[d.getDay()];if(!h)return false;
+  if(start<h[0]*60||start+mins>h[1]*60)return false;
+  const ds=dayStr(d);
+  return !BUSY.some(k=>k.barber_id===br.id&&k.day===ds&&k.start_min<start+mins&&start<k.start_min+k.minutes);
+}
+
+function renderDays(){
+  const box=$("days");box.innerHTML="";
+  for(let i=0;i<DAYS_AHEAD;i++){
+    const d=new Date(TODAY);d.setDate(TODAY.getDate()+i);
+    const open=openAny(d);
+    const b=document.createElement("button");b.type="button";b.className="day";
+    b.setAttribute("aria-pressed",st.day&&dayStr(st.day)===dayStr(d)?"true":"false");
+    b.innerHTML=`<small>${i===0?"hoy":DAYN[d.getDay()]}</small><b>${d.getDate()}</b>`;
+    b.setAttribute("aria-label",longDay(d)+(open?"":" (no atiende)"));
+    if(!open)b.disabled=true;
+    b.onclick=()=>{st.day=d;st.time=null;press(box,b);renderSlots();update()};
+    box.appendChild(b);
+  }
+}
+function renderSlots(){
+  const box=$("slots");box.innerHTML="";
+  if(!st.day){box.innerHTML='<p class="empty">Primero elegí un día.</p>';return}
+  const mins=st.svc?st.svc.minutes:BIZ.slot_minutes, step=BIZ.slot_minutes;
+  let o=1440,c=0;candidates().forEach(b=>{const h=b.hours[st.day.getDay()];if(h){o=Math.min(o,h[0]*60);c=Math.max(c,h[1]*60)}});
+  const isToday=dayStr(st.day)===dayStr(TODAY);let any=false;
+  for(let m=o;m+mins<=c;m+=step){
+    const b=document.createElement("button");b.type="button";b.className="slot";b.textContent=hhmm(m);b.setAttribute("aria-pressed",st.time===m?"true":"false");
+    const ok=!(isToday&&m<=NOWMIN)&&candidates().some(br=>free(br,st.day,m,mins));
+    if(!ok)b.disabled=true;else any=true;
+    b.onclick=()=>{st.time=m;press(box,b);update()};
+    box.appendChild(b);
+  }
+  if(!any)box.innerHTML='<p class="empty" style="grid-column:1/-1">No quedan horarios este día. Probá otro.</p>';
+}
+
+function update(){
+  const name=$("name").value.trim(),phoneOk=$("phone").value.replace(/\D/g,"").length>=8;
+  const ready=st.svc&&st.barber&&st.day&&st.time!==null&&name&&phoneOk;
+  const sum=$("sum");sum.textContent="";
+  if(st.svc){const s=document.createElement("strong");s.textContent=st.svc.name;sum.append(s)}
+  if(st.barber&&st.barber.id)sum.append(` · con ${st.barber.name}`);
+  if(st.day)sum.append(` · ${DAYN[st.day.getDay()]} ${st.day.getDate()}`);
+  if(st.time!==null)sum.append(` · ${hhmm(st.time)}`);
+  if(!ready)sum.append(!st.svc?(sum.textContent?" — ":"")+"Elegí el servicio":!st.barber?" — falta el barbero":!st.day?" — falta el día":st.time===null?" — falta la hora":!name?" — falta tu nombre":" — falta tu teléfono");
+  $("cta").disabled=!ready;$("err").hidden=true;
+}
+["name","phone"].forEach(id=>$(id).addEventListener("input",update));
+
+$("cta").onclick=async()=>{
+  const btn=$("cta");btn.disabled=true;btn.textContent="Reservando…";
+  const {data,error}=await sb.rpc("book",{p_slug:slug,p_service:st.svc.id,p_barber:st.barber.id,p_day:dayStr(st.day),
+    p_start:st.time,p_name:$("name").value.trim(),p_phone:$("phone").value.trim(),p_note:$("note").value.trim()||null});
+  btn.textContent="Reservar turno";
+  if(error){
+    const code=Object.keys(ERR).find(k=>(error.message||"").includes(k));
+    $("err").textContent=code?ERR[code]:"No se pudo reservar. Revisá tu conexión e intentá de nuevo.";$("err").hidden=false;
+    if(code==="horario_ocupado"){await loadBusy();st.time=null;renderSlots();update();$("err").textContent=ERR.horario_ocupado;$("err").hidden=false}
+    else btn.disabled=false;
+    return;
+  }
+  const when=`${longDay(st.day)} a las ${hhmm(st.time)}`;
+  $("doneText").textContent=`${st.svc.name} con ${data.barber}, el ${when}, en ${BIZ.name}.`;
+  const msg=`¡Hola! Reservé un turno por Agendi:\n• ${st.svc.name}\n• Con ${data.barber}\n• ${when}\n• Nombre: ${$("name").value.trim()}\n• Teléfono: ${$("phone").value.trim()}`;
+  const wa=data.barber_whatsapp||BIZ.whatsapp;
+  if(wa)$("doneWa").href=waLink(wa,msg);else $("doneWa").hidden=true;
+  $("app").hidden=true;$("bar").hidden=true;$("done").hidden=false;window.scrollTo(0,0);
+};
+$("again").onclick=()=>location.reload();
+load();
+</script>
+</body>
+</html>

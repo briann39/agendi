@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Panel del barbero · Agendi</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
+<style>
+.wrap{padding-bottom:40px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.next{border:2px solid var(--accent);background:var(--accent-soft)}
+.next .big{font-family:var(--display);font-size:28px;font-weight:800;font-variant-numeric:tabular-nums}
+.bk{display:flex;flex-direction:column;gap:8px}
+.bk-head{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.bk-time{font-family:var(--display);font-weight:700;font-size:18px;font-variant-numeric:tabular-nums}
+.pill{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
+.pill.confirmado{background:var(--accent-soft);border-color:var(--accent)}
+.pill.completado{opacity:.6}
+.acts{display:flex;flex-wrap:wrap;gap:8px}
+.dayhead{font-family:var(--display);font-weight:700;margin-top:6px;text-transform:capitalize}
+.hrow{display:grid;grid-template-columns:110px 1fr 1fr;gap:8px;align-items:center}
+.hrow label{margin:0;display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px}
+.hrow input[type=checkbox]{width:auto}
+.tabs{display:flex;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<div class="wrap" id="login" hidden>
+  <h1>Panel del barbero</h1>
+  <p class="muted">Entrá con el email y la contraseña que te dio tu barbería.</p>
+  <form class="field" id="loginForm">
+    <div><label for="email">Email</label><input id="email" type="email" autocomplete="email" required></div>
+    <div><label for="pass">Contraseña</label><input id="pass" type="password" autocomplete="current-password" required></div>
+    <p class="err" id="loginErr" hidden></p>
+    <button class="cta" type="submit" id="loginBtn">Entrar</button>
+  </form>
+</div>
+
+<div class="wrap" id="panel" hidden>
+  <div class="top">
+    <div><p class="muted" id="bizName"></p><h1 id="who" style="margin:0"></h1></div>
+    <button class="ghost" id="logout" type="button">Salir</button>
+  </div>
+  <div class="tabs" id="barberTabs" hidden></div>
+  <section id="nextBox"></section>
+  <section><h2>Próximos turnos</h2><div class="list" id="bookings"></div></section>
+  <section class="card field" id="hoursBox">
+    <h2 id="hoursTitle">Mis horarios</h2>
+    <div class="list" id="hours"></div>
+    <p class="muted" id="hoursMsg" hidden></p>
+    <button class="cta" id="saveHours" type="button">Guardar horarios</button>
+  </section>
+  <p class="muted" style="font-size:13px">Se actualiza solo cada minuto. <span id="updated"></span></p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="config.js"></script>
+<script src="common.js"></script>
+<script>
+let ME=null,BIZ=null,BARBERS=[],CUR=null,BOOKINGS=[],isOwner=false,timer=null;
+
+async function start(){
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session){$("login").hidden=false;$("panel").hidden=true;return}
+  ME=session.user;
+  const {data:bizs}=await sb.from("businesses").select("*");
+  BIZ=(bizs||[])[0];
+  const {data:brs}=await sb.from("barbers").select("*").order("position");
+  BARBERS=brs||[];
+  if(!BIZ){$("login").hidden=false;$("loginErr").textContent="Tu usuario todavía no está vinculado a una barbería. Pedile al dueño que te agregue.";$("loginErr").hidden=false;await sb.auth.signOut();return}
+  isOwner=BIZ.owner_id===ME.id;
+  CUR=BARBERS.find(b=>b.user_id===ME.id)||(isOwner?null:BARBERS[0]);
+  $("bizName").textContent=BIZ.name;
+  renderTabs();
+  $("login").hidden=true;$("panel").hidden=false;
+  await refresh();
+  clearInterval(timer);timer=setInterval(refresh,60000);
+}
+
+function renderTabs(){
+  $("who").textContent=CUR?`Hola, ${CUR.name}`:"Todos los barberos";
+  const box=$("barberTabs");box.innerHTML="";
+  box.hidden=!isOwner||BARBERS.length<2;
+  if(isOwner){
+    [{id:null,name:"Todos"},...BARBERS].forEach(b=>{
+      const t=document.createElement("button");t.type="button";t.className="ghost";t.textContent=b.name;
+      t.setAttribute("aria-pressed",(CUR?CUR.id:null)===b.id?"true":"false");
+      if((CUR?CUR.id:null)===b.id)t.style.borderColor="var(--accent)";
+      t.onclick=()=>{CUR=b.id?BARBERS.find(x=>x.id===b.id):null;renderTabs();renderBookings();renderHours()};
+      box.appendChild(t);
+    });
+  }
+  renderHours();
+}
+
+async function refresh(){
+  const today=dayStr(new Date());
+  const {data,error}=await sb.from("bookings").select("*").gte("day",today).neq("status","cancelado").order("day").order("start_min").limit(300);
+  if(!error){BOOKINGS=data||[];$("updated").textContent="Última vez: "+new Date().toLocaleTimeString("es-UY",{hour:"2-digit",minute:"2-digit"})}
+  renderBookings();
+}
+
+function barberName(id){const b=BARBERS.find(x=>x.id===id);return b?b.name:""}
+
+function renderBookings(){
+  const now=new Date(),nowMin=now.getHours()*60+now.getMinutes(),today=dayStr(now);
+  const list=BOOKINGS.filter(k=>(!CUR||k.barber_id===CUR.id)&&k.status!=="completado"&&!(k.day===today&&k.start_min+k.minutes<=nowMin));
+  const next=list[0];
+  const nb=$("nextBox");nb.innerHTML="";
+  if(next){
+    const c=document.createElement("div");c.className="card next bk";
+    const d=parseDay(next.day);
+    const mins=next.day===today?next.start_min-nowMin:null;
+    c.innerHTML=`<p class="muted">Siguiente turno</p><div class="big"></div><div class="who"></div>`;
+    c.querySelector(".big").textContent=(next.day===today?"Hoy ":DAYN[d.getDay()]+" "+d.getDate()+" · ")+hhmm(next.start_min)+(mins!==null&&mins>0&&mins<=120?` (en ${mins} min)`:mins!==null&&mins<=0?" (ahora)":"");
+    c.querySelector(".who").textContent=`${next.client_name} · ${next.service_name}${!CUR?" · con "+barberName(next.barber_id):""}`;
+    c.appendChild(actions(next));
+    nb.appendChild(c);
+  } else nb.innerHTML='<div class="card"><p class="muted">No tenés turnos próximos.</p></div>';
+
+  const box=$("bookings");box.innerHTML="";
+  const rest=list.slice(1);
+  if(!rest.length){box.innerHTML='<p class="empty">Nada más por ahora.</p>';return}
+  let last="";
+  rest.forEach(k=>{
+    if(k.day!==last){last=k.day;const h=document.createElement("div");h.className="dayhead";const d=parseDay(k.day);h.textContent=k.day===today?"Hoy":longDay(d);box.appendChild(h)}
+    const c=document.createElement("div");c.className="card bk";
+    c.innerHTML=`<div class="bk-head"><span class="bk-time"></span><span class="pill"></span></div><div class="txt"></div><div class="muted note"></div>`;
+    c.querySelector(".bk-time").textContent=hhmm(k.start_min);
+    const p=c.querySelector(".pill");p.textContent=k.status;p.classList.add(k.status);
+    c.querySelector(".txt").textContent=`${k.client_name} · ${k.service_name}${!CUR?" · con "+barberName(k.barber_id):""}`;
+    c.querySelector(".note").textContent=k.note||"";
+    c.appendChild(actions(k));
+    box.appendChild(c);
+  });
+}
+
+function actions(k){
+  const a=document.createElement("div");a.className="acts";
+  const d=parseDay(k.day),when=`${longDay(d)} a las ${hhmm(k.start_min)}`;
+  if(k.status==="pendiente"){
+    const ok=document.createElement("a");ok.className="ghost";ok.target="_blank";ok.rel="noopener";ok.textContent="Confirmar por WhatsApp";
+    ok.href=waLink(k.client_phone,`¡Hola ${k.client_name}! Te confirmo tu turno en ${BIZ.name}: ${k.service_name}, el ${when}. ¡Te esperamos!`);
+    ok.onclick=()=>setStatus(k,"confirmado");
+    a.appendChild(ok);
+  } else {
+    const rem=document.createElement("a");rem.className="ghost";rem.target="_blank";rem.rel="noopener";rem.textContent="Recordar por WhatsApp";
+    rem.href=waLink(k.client_phone,`¡Hola ${k.client_name}! Te recuerdo tu turno en ${BIZ.name}: ${k.service_name}, el ${when}.`);
+    a.appendChild(rem);
+  }
+  const done=document.createElement("button");done.type="button";done.className="ghost";done.textContent="Atendido";
+  done.onclick=()=>setStatus(k,"completado");a.appendChild(done);
+  const cancel=document.createElement("button");cancel.type="button";cancel.className="ghost danger";cancel.textContent="Cancelar";
+  cancel.onclick=()=>{
+    if(cancel.dataset.sure){setStatus(k,"cancelado");return}
+    cancel.dataset.sure="1";cancel.textContent="¿Seguro? Tocá de nuevo";
+    setTimeout(()=>{delete cancel.dataset.sure;cancel.textContent="Cancelar"},4000);
+  };
+  a.appendChild(cancel);
+  return a;
+}
+
+async function setStatus(k,status){
+  const {error}=await sb.from("bookings").update({status}).eq("id",k.id);
+  if(!error){k.status=status;if(status!=="pendiente"&&status!=="confirmado")BOOKINGS=BOOKINGS.filter(x=>x.id!==k.id);renderBookings()}
+}
+
+function renderHours(){
+  const box=$("hours");box.innerHTML="";$("hoursMsg").hidden=true;
+  const canEdit=CUR&&(CUR.user_id===ME.id||isOwner);
+  $("hoursBox").hidden=!canEdit;if(!canEdit)return;
+  $("hoursTitle").textContent=CUR.user_id===ME.id?"Mis horarios":`Horarios de ${CUR.name}`;
+  [1,2,3,4,5,6,0].forEach(dow=>{
+    const h=CUR.hours[dow];
+    const r=document.createElement("div");r.className="hrow";
+    const opts=sel=>Array.from({length:24},(_,i)=>`<option value="${i}"${i===sel?" selected":""}>${String(i).padStart(2,"0")}:00</option>`).join("");
+    r.innerHTML=`<label><input type="checkbox" id="on${dow}" ${h?"checked":""}> ${DAYL[dow]}</label>
+      <select id="o${dow}" aria-label="Abre ${DAYL[dow]}">${opts(h?h[0]:10)}</select>
+      <select id="c${dow}" aria-label="Cierra ${DAYL[dow]}">${opts(h?h[1]:19)}</select>`;
+    box.appendChild(r);
+    const sync=()=>{const on=$("on"+dow).checked;$("o"+dow).disabled=!on;$("c"+dow).disabled=!on};
+    r.querySelector("input").onchange=sync;sync();
+  });
+}
+$("saveHours").onclick=async()=>{
+  const hours={};
+  for(const dow of [0,1,2,3,4,5,6]){
+    if(!$("on"+dow).checked)continue;
+    const o=+$("o"+dow).value,c=+$("c"+dow).value;
+    if(c<=o){$("hoursMsg").textContent=`El ${DAYL[dow]} la hora de cierre tiene que ser después de la de apertura.`;$("hoursMsg").hidden=false;return}
+    hours[dow]=[o,c];
+  }
+  const {error}=await sb.from("barbers").update({hours}).eq("id",CUR.id);
+  $("hoursMsg").textContent=error?"No se pudo guardar. Probá de nuevo.":"Horarios guardados. Los clientes ya ven los nuevos horarios.";
+  $("hoursMsg").hidden=false;if(!error)CUR.hours=hours;
+};
+
+$("loginForm").onsubmit=async e=>{
+  e.preventDefault();$("loginErr").hidden=true;$("loginBtn").disabled=true;
+  const {error}=await sb.auth.signInWithPassword({email:$("email").value.trim(),password:$("pass").value});
+  $("loginBtn").disabled=false;
+  if(error){$("loginErr").textContent="Email o contraseña incorrectos.";$("loginErr").hidden=false;return}
+  start();
+};
+$("logout").onclick=async()=>{await sb.auth.signOut();clearInterval(timer);location.reload()};
+start();
+</script>
+</body>
+</html>
